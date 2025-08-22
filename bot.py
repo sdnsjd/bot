@@ -29,10 +29,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8250207332:AAEL-ыапывпа-пукепекеп5434ка")
-EXCEL_FILE_PATH = "data.xlsx"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "12345")
+EXCEL_FILE_PATH = "data/data.xlsx"
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost:5432/telegram_bot")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456778"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456678"))
 
 # Database connection pool settings
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))  # Minimum number of connections in pool

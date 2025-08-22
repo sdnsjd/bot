@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py .
+COPY bot.py .
 
 # Create logs directory
 RUN mkdir -p /app/logs
@@ -29,4 +29,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import asyncio, asyncpg; asyncio.run(asyncpg.connect('postgresql://user:password@postgres:5432/telegram_bot').close())" || exit 1
 
 # Run the bot
-CMD ["python", "main.py"]
+CMD ["python", "bot.py"]

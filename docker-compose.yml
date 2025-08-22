@@ -19,6 +19,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - bot_network
 
   # Telegram Bot Application
   bot:
@@ -26,11 +28,15 @@ services:
     container_name: telegram_bot_app
     restart: unless-stopped
     environment:
-      BOT_TOKEN: ${BOT_TOKEN:-1}
-      DATABASE_URL: postgresql+asyncpg://user:password@postgres:5432/telegram_bot
+      BOT_TOKEN: 8250207332:AAEL-Mo2QYVf-IJocDfLAFhxLV_ыафывафыва # bot token
+      ADMIN_ID: 12345678 # admin id
+      DATABASE_URL: postgresql+asyncpg://user:password@postgres:5432/telegram_bot # db credentials
+      DB_POOL_SIZE: 10
+      DB_MAX_OVERFLOW: 30
+      DB_POOL_TIMEOUT: 30
+      DB_POOL_RECYCLE: 3600
     volumes:
-      - ./data.xlsx:/app/data.xlsx:ro  # Mount Excel file as read-only
-      - ./logs:/app/logs  # Mount logs directory
+      - ./data:/app/data # Mount Excel file 
     depends_on:
       postgres:
         condition: service_healthy
