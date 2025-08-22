@@ -1,0 +1,46 @@
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: telegram_bot_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: telegram_bot
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d telegram_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Telegram Bot Application
+  bot:
+    build: .
+    container_name: telegram_bot_app
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:-1}
+      DATABASE_URL: postgresql+asyncpg://user:password@postgres:5432/telegram_bot
+    volumes:
+      - ./data.xlsx:/app/data.xlsx:ro  # Mount Excel file as read-only
+      - ./logs:/app/logs  # Mount logs directory
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bot_network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  bot_network:
+    driver: bridge
