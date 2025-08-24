@@ -29,10 +29,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "12345")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8250207332:AAEL-Mo2QYVf-IJocDfLAFhxLV_")
 EXCEL_FILE_PATH = "data/data.xlsx"
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost:5432/telegram_bot")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456678"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "5492521311"))
 
 # Database connection pool settings
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))  # Minimum number of connections in pool
@@ -152,6 +152,31 @@ class DatabaseManager:
             logger.error(f"Error fetching all users: {e}")
             return []
     
+    async def get_employee_telegram_mapping(self) -> pd.DataFrame:
+        """Get employee_number and telegram_id pairs from database as DataFrame."""
+        try:
+            async with self.get_session() as session:
+                stmt = select(User.employee_number, User.telegram_id).order_by(User.id)
+                result = await session.execute(stmt)
+                rows = result.fetchall()
+                
+                if not rows:
+                    logger.warning("No users found in database for mapping")
+                    return pd.DataFrame(columns=['employee_id', 'telegram_id'])
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(rows, columns=['employee_id', 'telegram_id'])
+                
+                # Remove duplicates, keeping the last occurrence
+                df = df.drop_duplicates(subset='employee_id', keep='last')
+                
+                logger.info(f"Retrieved {len(df)} unique employee-telegram mappings")
+                return df
+                
+        except Exception as e:
+            logger.error(f"Error fetching employee-telegram mapping: {e}")
+            return pd.DataFrame(columns=['employee_id', 'telegram_id'])
+    
     async def create_user(self, telegram_id: int, employee_number: str, username: Optional[str] = None) -> bool:
         """Create new user record."""
         try:
@@ -247,6 +272,76 @@ class ExcelDataManager:
         except Exception as e:
             logger.error(f"Error querying user data: {e}")
             return None
+    
+    async def merge_with_telegram_data(self, db_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """Merge Excel data with database telegram mappings."""
+        if not self._data_loaded or self.df is None:
+            logger.error("Excel data not loaded for merge")
+            return None
+        
+        try:
+            # Run merge operation in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            merged_df = await loop.run_in_executor(
+                None,
+                self._perform_merge_sync,
+                self.df.copy(),
+                db_df
+            )
+            
+            logger.info(f"Merge completed: {len(merged_df)} rows in result")
+            return merged_df
+            
+        except Exception as e:
+            logger.error(f"Error during merge operation: {e}")
+            return None
+    
+    def _perform_merge_sync(self, excel_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
+        """Синхронное объединение: записывает telegram_id из базы в колонку ID Excel."""
+        
+        if 'Номер сотрудника' not in excel_df.columns:
+            raise ValueError("Column 'Номер сотрудника' not found in Excel data")
+        
+        excel_merge_df = excel_df.copy()
+        db_merge_df = db_df.copy()
+
+        # Переименовываем для join
+        excel_merge_df.rename(columns={'Номер сотрудника': 'employee_id'}, inplace=True)
+        
+        # Приводим типы к строке
+        excel_merge_df['employee_id'] = excel_merge_df['employee_id'].astype(str).str.strip()
+        db_merge_df['employee_id'] = db_merge_df['employee_id'].astype(str).str.strip()
+
+        # Логирование для отладки
+        logger.info(f"Excel employee_id dtype: {excel_merge_df['employee_id'].dtype}")
+        logger.info(f"DB employee_id dtype: {db_merge_df['employee_id'].dtype}")
+
+        # Джойним, подставляем telegram_id
+        merged_df = pd.merge(
+            excel_merge_df,
+            db_merge_df[['employee_id', 'telegram_id']],
+            on='employee_id',
+            how='left',
+            sort=False
+        )
+
+        # Переименовываем обратно
+        merged_df.rename(columns={'employee_id': 'Номер сотрудника'}, inplace=True)
+
+        # Перезаписываем колонку ID данными из telegram_id (если они есть)
+        if 'ID' in merged_df.columns:
+            merged_df['ID'] = merged_df['telegram_id'].combine_first(merged_df['ID'])
+            merged_df.drop(columns=['telegram_id'], inplace=True)
+        else:
+            merged_df.rename(columns={'telegram_id': 'ID'}, inplace=True)
+
+        # Лог статистики
+        matched_count = merged_df['ID'].notna().sum()
+        total_count = len(merged_df)
+        logger.info(f"Merge statistics: {matched_count}/{total_count} records matched with Telegram IDs")
+
+        return merged_df
+
 
 # Global managers (initialized once)
 db_manager = None
@@ -267,6 +362,9 @@ def get_main_keyboard(is_admin_user: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📥 Upload Data", callback_data="admin_upload_data"),
             InlineKeyboardButton(text="📤 Download Data", callback_data="admin_download_data")
         ])
+        buttons.append([
+            InlineKeyboardButton(text="🔄 Merge Data", callback_data="admin_merge_data")
+        ])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -280,6 +378,9 @@ def get_registration_keyboard(is_admin_user: bool = False) -> InlineKeyboardMark
         buttons.append([
             InlineKeyboardButton(text="📥 Upload Data", callback_data="admin_upload_data"),
             InlineKeyboardButton(text="📤 Download Data", callback_data="admin_download_data")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="🔄 Merge Data", callback_data="admin_merge_data")
         ])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -355,6 +456,41 @@ async def create_users_excel() -> str:
         
     except Exception as e:
         logger.error(f"Error creating users Excel file: {e}")
+        return None
+
+async def create_merged_excel() -> Optional[str]:
+    """Create merged Excel file with employee data and telegram IDs."""
+    try:
+        # Get employee-telegram mapping from database
+        db_df = await db_manager.get_employee_telegram_mapping()
+        
+        if db_df.empty:
+            logger.warning("No employee-telegram mapping found in database")
+            return None
+        
+        # Merge with Excel data
+        merged_df = await data_manager.merge_with_telegram_data(db_df)
+        
+        if merged_df is None:
+            logger.error("Merge operation failed")
+            return None
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"merged_data_{timestamp}.xlsx"
+        
+        # Run pandas operations in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: merged_df.to_excel(filename, index=False)
+        )
+        
+        logger.info(f"Created merged Excel file: {filename} with {len(merged_df)} rows")
+        return filename
+        
+    except Exception as e:
+        logger.error(f"Error creating merged Excel file: {e}")
         return None
 
 async def startup_handler():
@@ -530,7 +666,7 @@ async def get_info_handler(callback: CallbackQuery):
         response_text = (
             "❌ <b>Информация не найдена</b>\n\n"
             f"Номер сотрудника: <code>{existing_user.employee_number}</code>\n\n"
-            "Обратитесь к администратору для добавления ваших данных в Excel файл."
+            "Обратитесь к администратору для уточнения информации."
         )
     
     # Check if the content is different before editing
@@ -626,6 +762,98 @@ async def admin_download_data_handler(callback: CallbackQuery):
     else:
         await callback.message.answer(
             "❌ Не удалось создать файл с данными пользователей."
+        )
+
+@dp.callback_query(F.data == "admin_merge_data")
+async def admin_merge_data_handler(callback: CallbackQuery):
+    """Handle admin merge data button."""
+    user_id = callback.from_user.id
+    
+    if not is_admin(user_id):
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Выполнение слияния данных...", show_alert=False)
+    
+    try:
+        # Show initial message
+        await callback.message.edit_text(
+            "🔄 <b>Слияние данных</b>\n\n"
+            "⏳ Получение данных из базы данных...",
+            reply_markup=None
+        )
+        
+        # Create merged Excel file
+        merged_file = await create_merged_excel()
+        
+        if merged_file:
+            try:
+                # Update message
+                await callback.message.edit_text(
+                    "🔄 <b>Слияние данных</b>\n\n"
+                    "📤 Отправка файла...",
+                    reply_markup=None
+                )
+                
+                # Create InputFile object for the local file
+                input_file = FSInputFile(merged_file)
+                
+                # Send the file
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=input_file,
+                    caption=(
+                        "🔄 <b>Результат слияния данных</b>\n\n"
+                        "📊 Excel файл с объединенными данными:\n"
+                        "• Все строки из исходного Excel файла\n"
+                        "• Telegram ID добавлены для зарегистрированных пользователей\n"
+                        "• Сохранен исходный порядок строк\n"
+                        "• Дубликаты employee_id обработаны корректно"
+                    )
+                )
+                
+                # Update final message
+                await callback.message.edit_text(
+                    "✅ <b>Слияние завершено!</b>\n\n"
+                    "📄 Файл с объединенными данными отправлен выше.",
+                    reply_markup=get_main_keyboard(True)
+                )
+                
+                # Clean up the file
+                os.remove(merged_file)
+                logger.info(f"Sent merged data file to admin {user_id}")
+                
+            except Exception as e:
+                logger.error(f"Error sending merged file to admin: {e}")
+                await callback.message.edit_text(
+                    "❌ <b>Ошибка при отправке файла</b>\n\n"
+                    "Файл создан, но произошла ошибка при отправке. Попробуйте позже.",
+                    reply_markup=get_main_keyboard(True)
+                )
+                # Clean up the file even if sending failed
+                if os.path.exists(merged_file):
+                    try:
+                        os.remove(merged_file)
+                    except:
+                        pass
+        else:
+            await callback.message.edit_text(
+                "❌ <b>Ошибка слияния данных</b>\n\n"
+                "Возможные причины:\n"
+                "• Нет зарегистрированных пользователей\n"
+                "• Ошибка доступа к Excel файлу\n"
+                "• Некорректная структура данных\n\n"
+                "Проверьте логи для получения подробной информации.",
+                reply_markup=get_main_keyboard(True)
+            )
+            
+    except Exception as e:
+        logger.error(f"Unexpected error during merge operation: {e}")
+        await callback.message.edit_text(
+            "❌ <b>Неожиданная ошибка</b>\n\n"
+            "Произошла ошибка при выполнении слияния данных. "
+            "Попробуйте позже или обратитесь к разработчику.",
+            reply_markup=get_main_keyboard(True)
         )
 
 @dp.callback_query(F.data == "admin_cancel")
